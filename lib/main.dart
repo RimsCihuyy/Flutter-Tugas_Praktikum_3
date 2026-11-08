@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -76,23 +77,20 @@ class Product {
     required this.brand,
   });
 
+  // Parsing dibuat toleran: MySQL/PHP kadang mengirim angka sebagai string ("20")
   factory Product.fromJson(Map<String, dynamic> json) {
     return Product(
-      id: json['id'] ?? 0,
-      title: json['title'] ?? 'Unknown Product',
-      description: json['description'] ?? '',
-      category: json['category'] ?? 'Other',
-      price: (json['price'] as num?)?.toDouble() ?? 0,
-      rating: (json['rating'] as num?)?.toDouble() ?? 0,
-      stock: json['stock'] ?? 0,
-      thumbnail: json['thumbnail'] ?? '',
-      images: (json['images'] as List<dynamic>?)
-              ?.map((image) => image.toString())
-              .toList() ??
-          [],
-      discountPercentage:
-          (json['discountPercentage'] as num?)?.toDouble() ?? 0,
-      brand: json['brand'] ?? 'Pastel Collection',
+      id: _toInt(json['id']),
+      title: json['title']?.toString() ?? 'Unknown Product',
+      description: json['description']?.toString() ?? '',
+      category: json['category']?.toString() ?? 'Other',
+      price: _toDouble(json['price']),
+      rating: _toDouble(json['rating']),
+      stock: _toInt(json['stock']),
+      thumbnail: json['thumbnail']?.toString() ?? '',
+      images: _toImages(json['images']),
+      discountPercentage: _toDouble(json['discountPercentage']),
+      brand: json['brand']?.toString() ?? 'Pastel Collection',
     );
   }
 }
@@ -100,21 +98,64 @@ class Product {
 // ==================== API SERVICE ====================
 
 class ProductService {
-  static const String baseUrl = 'https://dummyjson.com/products';
+  // Android emulator: 10.0.2.2 = "localhost" milik laptop.
+  // HP asli: ganti dengan IP laptop di WiFi yang sama, mis. '192.168.1.10'.
+  static const String host = 'localhost';
+  static const String baseUrl = 'http://$host:8080/products';
 
+  static const Map<String, String> _headers = {
+    'Content-Type': 'application/json',
+  };
+  static const Duration _timeout = Duration(seconds: 15);
+
+  // READ - semua produk
   static Future<List<Product>> fetchProducts() async {
-    final response = await http.get(Uri.parse('$baseUrl?limit=0'));
+    final response = await http
+        .get(Uri.parse('$baseUrl?limit=0'))
+        .timeout(_timeout);
+    _check(response, 'Memuat produk');
 
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      final List products = data['products'];
+    final data = jsonDecode(response.body);
+    final List products = data is Map ? data['products'] : data;
+    return products.map((item) => Product.fromJson(item)).toList();
+  }
 
-      return products
-          .map((item) => Product.fromJson(item))
-          .toList();
+  // CREATE
+  static Future<void> createProduct(Map<String, dynamic> body) async {
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/add'),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(_timeout);
+    _check(response, 'Menambah produk');
+  }
+
+  // UPDATE
+  static Future<void> updateProduct(int id, Map<String, dynamic> body) async {
+    final response = await http
+        .patch(
+          Uri.parse('$baseUrl/$id'),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(_timeout);
+    _check(response, 'Mengubah produk');
+  }
+
+  // DELETE
+  static Future<void> deleteProduct(int id) async {
+    final response = await http
+        .delete(Uri.parse('$baseUrl/$id'))
+        .timeout(_timeout);
+    _check(response, 'Menghapus produk');
+  }
+
+  static void _check(http.Response response, String action) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('$action gagal (${response.statusCode})');
     }
-
-    throw Exception('Failed to load products');
   }
 }
 
@@ -170,11 +211,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   List<String> get _categories {
-    final categories = _products
-        .map((product) => product.category)
-        .toSet()
-        .toList()
-      ..sort();
+    final categories =
+        _products.map((product) => product.category).toSet().toList()..sort();
 
     return ['All', ...categories];
   }
@@ -183,12 +221,13 @@ class _HomePageState extends State<HomePage> {
     final query = _searchController.text.trim().toLowerCase();
 
     _filteredProducts = _products.where((product) {
-      final matchesSearch = product.title.toLowerCase().contains(query) ||
+      final matchesSearch =
+          product.title.toLowerCase().contains(query) ||
           product.category.toLowerCase().contains(query) ||
           product.brand.toLowerCase().contains(query);
 
-      final matchesCategory = _selectedCategory == 'All' ||
-          product.category == _selectedCategory;
+      final matchesCategory =
+          _selectedCategory == 'All' || product.category == _selectedCategory;
 
       return matchesSearch && matchesCategory;
     }).toList();
@@ -216,90 +255,87 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: AppColors.purple,
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Add product'),
+        onPressed: () async {
+          final added = await Navigator.push<bool>(
+            context,
+            MaterialPageRoute(builder: (_) => const ProductFormPage()),
+          );
+          if (added == true) _loadProducts();
+        },
+      ),
       body: SafeArea(
         child: _isLoading
             ? const Center(
-                child: CircularProgressIndicator(
-                  color: AppColors.purple,
-                ),
+                child: CircularProgressIndicator(color: AppColors.purple),
               )
             : _errorMessage != null
-                ? _buildError()
-                : RefreshIndicator(
-                    color: AppColors.purple,
-                    onRefresh: _loadProducts,
-                    child: CustomScrollView(
-                      keyboardDismissBehavior:
-                          ScrollViewKeyboardDismissBehavior.onDrag,
-                      slivers: [
-                        SliverToBoxAdapter(
-                          child: _buildHeader(),
-                        ),
-                        SliverToBoxAdapter(
-                          child: _buildSearchBar(),
-                        ),
-                        SliverToBoxAdapter(
-                          child: _buildCategorySection(),
-                        ),
-                        SliverToBoxAdapter(
-                          child: _buildSectionTitle(),
-                        ),
-                        if (_filteredProducts.isEmpty)
-                          const SliverFillRemaining(
-                            hasScrollBody: false,
-                            child: Center(
-                              child: Text(
-                                'No products found 🥺',
-                                style: TextStyle(
-                                  color: AppColors.subtitle,
-                                  fontSize: 16,
-                                ),
-                              ),
+            ? _buildError()
+            : RefreshIndicator(
+                color: AppColors.purple,
+                onRefresh: _loadProducts,
+                child: CustomScrollView(
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  slivers: [
+                    SliverToBoxAdapter(child: _buildHeader()),
+                    SliverToBoxAdapter(child: _buildSearchBar()),
+                    SliverToBoxAdapter(child: _buildCategorySection()),
+                    SliverToBoxAdapter(child: _buildSectionTitle()),
+                    if (_filteredProducts.isEmpty)
+                      const SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: Center(
+                          child: Text(
+                            'No products found 🥺',
+                            style: TextStyle(
+                              color: AppColors.subtitle,
+                              fontSize: 16,
                             ),
-                          )
-                        else
-                          SliverPadding(
-                            padding: const EdgeInsets.fromLTRB(
-                              18,
-                              0,
-                              18,
-                              24,
-                            ),
-                            sliver: SliverGrid(
-                              delegate: SliverChildBuilderDelegate(
-                                (context, index) {
-                                  final product =
-                                      _filteredProducts[index];
+                          ),
+                        ),
+                      )
+                    else
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(18, 0, 18, 90),
+                        sliver: SliverGrid(
+                          delegate: SliverChildBuilderDelegate((
+                            context,
+                            index,
+                          ) {
+                            final product = _filteredProducts[index];
 
-                                  return ProductCard(
-                                    product: product,
-                                    index: index,
-                                    onTap: () {
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (_) => ProductDetailPage(
-                                            product: product,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  );
-                                },
-                                childCount: _filteredProducts.length,
-                              ),
-                              gridDelegate:
-                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                            return ProductCard(
+                              product: product,
+                              index: index,
+                              onTap: () async {
+                                final changed = await Navigator.push<bool>(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        ProductDetailPage(product: product),
+                                  ),
+                                );
+                                if (changed == true) _loadProducts();
+                              },
+                            );
+                          }, childCount: _filteredProducts.length),
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
                                 crossAxisCount: 2,
                                 crossAxisSpacing: 14,
                                 mainAxisSpacing: 16,
                                 childAspectRatio: 0.61,
                               ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
       ),
     );
   }
@@ -339,10 +375,7 @@ class _HomePageState extends State<HomePage> {
                 SizedBox(height: 3),
                 Text(
                   'Little things, lovely days ✨',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.subtitle,
-                  ),
+                  style: TextStyle(fontSize: 12, color: AppColors.subtitle),
                 ),
               ],
             ),
@@ -384,20 +417,14 @@ class _HomePageState extends State<HomePage> {
           onChanged: _onSearchChanged,
           decoration: InputDecoration(
             hintText: 'Find something lovely...',
-            hintStyle: const TextStyle(
-              color: AppColors.subtitle,
-              fontSize: 13,
-            ),
+            hintStyle: const TextStyle(color: AppColors.subtitle, fontSize: 13),
             prefixIcon: const Icon(
               Icons.search_rounded,
               color: AppColors.purple,
             ),
             suffixIcon: IconButton(
               tooltip: 'Clear search',
-              icon: const Icon(
-                Icons.close_rounded,
-                color: AppColors.subtitle,
-              ),
+              icon: const Icon(Icons.close_rounded, color: AppColors.subtitle),
               onPressed: () {
                 _searchController.clear();
                 _onSearchChanged('');
@@ -434,29 +461,21 @@ class _HomePageState extends State<HomePage> {
             onTap: () => _selectCategory(category),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(
-                horizontal: 17,
-                vertical: 9,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 17, vertical: 9),
               decoration: BoxDecoration(
                 color: selected ? AppColors.purple : Colors.white,
                 borderRadius: BorderRadius.circular(30),
                 border: Border.all(
-                  color: selected
-                      ? AppColors.purple
-                      : AppColors.lavender,
+                  color: selected ? AppColors.purple : AppColors.lavender,
                 ),
               ),
               alignment: Alignment.center,
               child: Text(
-                category == 'All'
-                    ? 'All items'
-                    : _capitalize(category),
+                category == 'All' ? 'All items' : _capitalize(category),
                 style: TextStyle(
                   color: selected ? Colors.white : AppColors.text,
                   fontSize: 12,
-                  fontWeight:
-                      selected ? FontWeight.bold : FontWeight.w500,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.w500,
                 ),
               ),
             ),
@@ -488,10 +507,7 @@ class _HomePageState extends State<HomePage> {
                 SizedBox(height: 5),
                 Text(
                   'Your next favorite is waiting 💗',
-                  style: TextStyle(
-                    color: AppColors.subtitle,
-                    fontSize: 12,
-                  ),
+                  style: TextStyle(color: AppColors.subtitle, fontSize: 12),
                 ),
               ],
             ),
@@ -540,9 +556,7 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 20),
             FilledButton(
               onPressed: _loadProducts,
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.purple,
-              ),
+              style: FilledButton.styleFrom(backgroundColor: AppColors.purple),
               child: const Text('Try again'),
             ),
           ],
@@ -717,10 +731,7 @@ class ProductCard extends StatelessWidget {
 class ProductDetailPage extends StatelessWidget {
   final Product product;
 
-  const ProductDetailPage({
-    super.key,
-    required this.product,
-  });
+  const ProductDetailPage({super.key, required this.product});
 
   @override
   Widget build(BuildContext context) {
@@ -737,12 +748,34 @@ class ProductDetailPage extends StatelessWidget {
               ),
               title: const Text(
                 'Product details',
-                style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
               ),
               centerTitle: true,
+              actions: [
+                IconButton(
+                  tooltip: 'Edit',
+                  icon: const Icon(Icons.edit_rounded, color: AppColors.purple),
+                  onPressed: () async {
+                    final saved = await Navigator.push<bool>(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ProductFormPage(product: product),
+                      ),
+                    );
+                    if (saved == true && context.mounted) {
+                      Navigator.pop(context, true);
+                    }
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Delete',
+                  icon: const Icon(
+                    Icons.delete_outline_rounded,
+                    color: Color(0xFFD9667F),
+                  ),
+                  onPressed: () => _confirmDelete(context),
+                ),
+              ],
             ),
             SliverToBoxAdapter(
               child: Column(
@@ -872,6 +905,38 @@ class ProductDetailPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete product?'),
+        content: Text('"${product.title}" will be removed permanently.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    try {
+      await ProductService.deleteProduct(product.id);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Product deleted')));
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
   }
 
   Widget _buildProductImage() {
@@ -1029,11 +1094,7 @@ class ProductDetailPage extends StatelessWidget {
               color: background,
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(
-              icon,
-              color: AppColors.purple,
-              size: 22,
-            ),
+            child: Icon(icon, color: AppColors.purple, size: 22),
           ),
           const SizedBox(width: 13),
           Expanded(
@@ -1065,7 +1126,221 @@ class ProductDetailPage extends StatelessWidget {
   }
 }
 
+// ==================== PRODUCT FORM PAGE (ADD / EDIT) ====================
+
+class ProductFormPage extends StatefulWidget {
+  // null = tambah produk baru, berisi = edit produk
+  final Product? product;
+
+  const ProductFormPage({super.key, this.product});
+
+  @override
+  State<ProductFormPage> createState() => _ProductFormPageState();
+}
+
+class _ProductFormPageState extends State<ProductFormPage> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _title;
+  late final TextEditingController _description;
+  late final TextEditingController _category;
+  late final TextEditingController _brand;
+  late final TextEditingController _price;
+  late final TextEditingController _stock;
+  late final TextEditingController _thumbnail;
+  bool _saving = false;
+
+  bool get _isEdit => widget.product != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.product;
+    _title = TextEditingController(text: p?.title ?? '');
+    _description = TextEditingController(text: p?.description ?? '');
+    _category = TextEditingController(text: p?.category ?? '');
+    _brand = TextEditingController(text: p?.brand ?? '');
+    _price = TextEditingController(text: p == null ? '' : '${p.price}');
+    _stock = TextEditingController(text: p == null ? '' : '${p.stock}');
+    _thumbnail = TextEditingController(text: p?.thumbnail ?? '');
+  }
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _description.dispose();
+    _category.dispose();
+    _brand.dispose();
+    _price.dispose();
+    _stock.dispose();
+    _thumbnail.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+
+    final body = <String, dynamic>{
+      'title': _title.text.trim(),
+      'description': _description.text.trim(),
+      'category': _category.text.trim().toLowerCase().replaceAll(' ', '-'),
+      'brand': _brand.text.trim(),
+      'price': double.parse(_price.text.trim().replaceAll(',', '.')),
+      'stock': int.parse(_stock.text.trim()),
+    };
+    if (_thumbnail.text.trim().isNotEmpty) {
+      body['thumbnail'] = _thumbnail.text.trim();
+    }
+
+    try {
+      if (_isEdit) {
+        await ProductService.updateProduct(widget.product!.id, body);
+      } else {
+        await ProductService.createProduct(body);
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_isEdit ? 'Product updated' : 'Product added')),
+      );
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Widget _field(
+    TextEditingController controller,
+    String label, {
+    TextInputType? keyboard,
+    int maxLines = 1,
+    String? Function(String?)? validator,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: TextFormField(
+        controller: controller,
+        keyboardType: keyboard,
+        maxLines: maxLines,
+        validator: validator,
+        decoration: InputDecoration(
+          labelText: label,
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  String? _required(String? v) =>
+      (v == null || v.trim().isEmpty) ? 'Wajib diisi' : null;
+
+  String? _validPrice(String? v) {
+    final n = double.tryParse((v ?? '').trim().replaceAll(',', '.'));
+    return (n == null || n < 0) ? 'Isi dengan angka yang valid' : null;
+  }
+
+  String? _validStock(String? v) {
+    final n = int.tryParse((v ?? '').trim());
+    return (n == null || n < 0) ? 'Isi dengan bilangan bulat' : null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          _isEdit ? 'Edit product' : 'Add product',
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+      ),
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              _field(_title, 'Title', validator: _required),
+              _field(_description, 'Description', maxLines: 3),
+              _field(
+                _category,
+                'Category (contoh: laptops)',
+                validator: _required,
+              ),
+              _field(_brand, 'Brand'),
+              _field(
+                _price,
+                'Price',
+                keyboard: const TextInputType.numberWithOptions(decimal: true),
+                validator: _validPrice,
+              ),
+              _field(
+                _stock,
+                'Stock',
+                keyboard: TextInputType.number,
+                validator: _validStock,
+              ),
+              _field(
+                _thumbnail,
+                'Thumbnail URL (opsional)',
+                keyboard: TextInputType.url,
+              ),
+              const SizedBox(height: 6),
+              SizedBox(
+                height: 52,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.purple,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  onPressed: _saving ? null : _save,
+                  child: _saving
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.5,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Text(_isEdit ? 'Save changes' : 'Add product'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ==================== HELPER ====================
+
+int _toInt(dynamic v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
+
+double _toDouble(dynamic v) =>
+    v is num ? v.toDouble() : double.tryParse('$v') ?? 0;
+
+List<String> _toImages(dynamic v) {
+  dynamic value = v;
+  if (value is String && value.isNotEmpty) {
+    try {
+      value = jsonDecode(value);
+    } catch (_) {
+      return [value as String];
+    }
+  }
+  if (value is List) return value.map((e) => e.toString()).toList();
+  return [];
+}
 
 String _capitalize(String value) {
   if (value.isEmpty) return value;
